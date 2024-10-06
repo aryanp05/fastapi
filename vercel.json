@@ -1,0 +1,17 @@
+{
+    "version": 2,
+    "builds": [
+      {
+        "src": "main.py", 
+        "use": "@vercel/python"
+      }
+    ],
+    "routes": [
+      {
+        "src": "/process_video",
+        "methods": ["POST"],
+        "dest": "main.py"
+      }
+    ]
+  }
+  
