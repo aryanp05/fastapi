@@ -1,25 +1,36 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import mediapipe as mp
 import numpy as np
 import math
 import time
-import numpy as np
+import base64
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or specify domains
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods like POST, GET, OPTIONS, etc.
+    allow_headers=["*"],  # Allow all headers
+)
 
 # Initialize Mediapipe Face Mesh
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
 # Thresholds for detecting attention states
-PITCH_FORWARD_THRESH = 15
-YAW_LEFT_THRESH = -40
-YAW_RIGHT_THRESH = 40
-PITCH_DOWN_THRESH = -30
+PITCH_FORWARD_THRESH = 25
+YAW_LEFT_THRESH = -30
+YAW_RIGHT_THRESH = 30
+PITCH_DOWN_THRESH = -15
+PITCH_DOWN_THRESH_WITH_ROLL = -8
 DISTRACTED_TIME_THINKING = 5
 DISTRACTED_TIME_NOTES = 5
+ROLL_BIDIRECTION_THRESH = 10
 
 # Initialize state tracking variables
 current_state = "paying attention"
@@ -34,14 +45,14 @@ def rotation_matrix_to_angles(rotation_matrix):
     return np.array([x, y, z]) * 180. / math.pi
 
 # Function to update the state based on pitch and yaw
-def update_state(pitch, yaw):
+def update_state(pitch, yaw, roll):
     global current_state, thinking_start_time, notes_start_time
 
     if -PITCH_FORWARD_THRESH <= pitch <= PITCH_FORWARD_THRESH and abs(yaw) <= 15:
         current_state = "paying attention"
         thinking_start_time = None
         notes_start_time = None
-    elif pitch < PITCH_DOWN_THRESH:
+    elif (pitch < PITCH_DOWN_THRESH and abs(roll) < ROLL_BIDIRECTION_THRESH) or (pitch < PITCH_DOWN_THRESH_WITH_ROLL):
         if current_state != "taking notes" and current_state != "distracted2" and current_state != "distracted":
             current_state = "taking notes"
             notes_start_time = time.time() if notes_start_time is None else notes_start_time
@@ -56,13 +67,18 @@ def update_state(pitch, yaw):
             current_state = "distracted"
             thinking_start_time = None
 
-# API endpoint for processing video frames
+# API endpoint for processing a base64-encoded string representing the video frame (JPG)
 @app.post("/process_video/")
-async def process_video(file: UploadFile = File(...)):
-    video_data = await file.read()
+async def process_video(file: dict):
+    base64_image = file.get('image', None)
+    if base64_image is None:
+        return JSONResponse({"error": "Image data missing"}, status_code=400)
 
+    # Decode the Base64 string back into binary data (bytes)
+    image_bytes = base64.b64decode(base64_image)
+    
     # Convert bytes data to OpenCV image
-    nparr = np.frombuffer(video_data, np.uint8)
+    nparr = np.frombuffer(image_bytes, np.uint8)
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     
     # Convert the image to RGB for Mediapipe
@@ -95,8 +111,14 @@ async def process_video(file: UploadFile = File(...)):
                     face_coordination_in_real_world, face_coordination_in_image, cam_matrix, dist_matrix
                 )
                 rotation_matrix, _ = cv2.Rodrigues(rotation_vec)
-                pitch, yaw, _ = rotation_matrix_to_angles(rotation_matrix)
+                pitch, yaw, roll = rotation_matrix_to_angles(rotation_matrix)
 
-                update_state(pitch, yaw)
+                update_state(pitch, yaw, roll)
 
+    # Encode the processed image to JPG and convert to Base64
+    _, img_encoded = cv2.imencode('.jpg', image)
+    img_bytes = img_encoded.tobytes()
+    img_base64 = base64.b64encode(img_bytes).decode('utf-8')
+
+    # Return the Base64-encoded processed image and the state
     return JSONResponse({"state": current_state})
